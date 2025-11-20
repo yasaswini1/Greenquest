@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Globe, Lock, Image as ImageIcon, MapPin, Calendar, Heart, MessageCircle, Share2, Loader, AlertCircle } from 'lucide-react';
+import { Globe, Lock, Image as ImageIcon, MapPin, Calendar, Heart, MessageCircle, Share2, Loader, AlertCircle, Trash2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../lib/api';
+import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import type { Activity } from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
@@ -11,7 +12,13 @@ export function FeedView() {
   const [posts, setPosts] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const { token } = useAuth();
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteDialog, setDeleteDialog] = useState<{ isOpen: boolean; activityId: string | null; activityName: string }>({
+    isOpen: false,
+    activityId: null,
+    activityName: '',
+  });
+  const { token, user } = useAuth();
 
   useEffect(() => {
     const loadFeed = async () => {
@@ -55,6 +62,38 @@ export function FeedView() {
     if (diffHours < 24) return `${diffHours}h ago`;
     if (diffDays < 7) return `${diffDays}d ago`;
     return date.toLocaleDateString();
+  };
+
+  const handleDeleteClick = (activityId: string, activityType: string) => {
+    setDeleteDialog({
+      isOpen: true,
+      activityId,
+      activityName: activityType,
+    });
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!token || !deleteDialog.activityId) return;
+
+    setDeletingId(deleteDialog.activityId);
+    try {
+      await api.deleteActivity(deleteDialog.activityId, token);
+      // Remove from local state
+      setPosts(posts.filter(post => post.id !== deleteDialog.activityId));
+      setDeleteDialog({ isOpen: false, activityId: null, activityName: '' });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete post');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleDeleteCancel = () => {
+    setDeleteDialog({ isOpen: false, activityId: null, activityName: '' });
+  };
+
+  const isOwnPost = (post: Activity) => {
+    return post.user_id === user?.id;
   };
 
   return (
@@ -143,8 +182,24 @@ export function FeedView() {
                         </div>
                       </div>
                     </div>
-                    <div className="px-3 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-medium">
-                      {post.type}
+                    <div className="flex items-center gap-2">
+                      <div className="px-3 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-medium">
+                        {post.type}
+                      </div>
+                      {isOwnPost(post) && (
+                        <button
+                          onClick={() => handleDeleteClick(post.id, post.type)}
+                          disabled={deletingId === post.id}
+                          className="p-1.5 text-gray-400 hover:text-rose-600 transition-colors disabled:opacity-50"
+                          title="Delete post"
+                        >
+                          {deletingId === post.id ? (
+                            <Loader className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-4 h-4" />
+                          )}
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -203,6 +258,16 @@ export function FeedView() {
           })}
         </div>
       )}
+
+      {/* Delete Confirmation Dialog */}
+      <DeleteConfirmDialog
+        isOpen={deleteDialog.isOpen}
+        onClose={handleDeleteCancel}
+        onConfirm={handleDeleteConfirm}
+        title="Delete Post"
+        message="Are you sure you want to delete this post?"
+        itemName={deleteDialog.activityName}
+      />
     </div>
   );
 }

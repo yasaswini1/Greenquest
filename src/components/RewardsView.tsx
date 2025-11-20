@@ -1,4 +1,6 @@
 import { Gift, Trophy, Star, ShoppingBag, Coffee, Ticket, Award, Sparkles } from 'lucide-react';
+import { useCart } from '../context/CartContext';
+import { useAuth } from '../context/AuthContext';
 
 const rewards = [
   {
@@ -91,7 +93,9 @@ const redemptionHistory = [
 ];
 
 export function RewardsView() {
-  const userPoints = 4523;
+  const { profile } = useAuth();
+  const { addToCart } = useCart();
+  const userPoints = profile?.stats.totalPoints ?? 0;
   const totalRedeemed = redemptionHistory.reduce((sum, r) => sum + r.points, 0);
 
   return (
@@ -126,6 +130,7 @@ export function RewardsView() {
               key={reward.id} 
               reward={reward} 
               userPoints={userPoints}
+              onAddToCart={addToCart}
             />
           ))}
         </div>
@@ -176,13 +181,34 @@ export function RewardsView() {
 
 function RewardCard({ 
   reward, 
-  userPoints 
+  userPoints,
+  onAddToCart
 }: { 
   reward: any; 
   userPoints: number;
+  onAddToCart: (item: any) => void;
 }) {
   const Icon = reward.icon;
   const canAfford = userPoints >= reward.points;
+
+  const handleAddToCart = () => {
+    onAddToCart({
+      id: reward.id,
+      name: reward.name,
+      description: reward.description,
+      points: reward.points,
+      category: reward.category,
+      available: reward.available,
+    });
+    // Show a brief visual feedback
+    const button = document.activeElement as HTMLElement;
+    if (button) {
+      button.style.transform = 'scale(0.95)';
+      setTimeout(() => {
+        button.style.transform = '';
+      }, 150);
+    }
+  };
 
   return (
     <div className={`border-2 rounded-lg p-5 transition-all ${
@@ -221,8 +247,16 @@ function RewardCard({
           Redeemed
         </button>
       ) : canAfford ? (
-        <button className="w-full bg-emerald-600 text-white py-2 rounded-lg hover:bg-emerald-700 transition-colors">
-          Redeem Now
+        <button 
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            handleAddToCart();
+          }}
+          className="w-full bg-emerald-600 text-white py-2 rounded-lg hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2 cursor-pointer"
+        >
+          <ShoppingBag className="w-4 h-4" />
+          Add to Cart
         </button>
       ) : (
         <button 

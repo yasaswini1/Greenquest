@@ -3,13 +3,14 @@ import { ImpactChart } from './ImpactChart';
 import { WeeklyActivity } from './WeeklyActivity';
 import { TrackingView } from './TrackingView';
 import Forest from './Forest';
+import { DailyChallengesView } from './DailyChallengesView';
 import { useAuth } from '../context/AuthContext';
 import type { Activity } from '../types';
 
 export function Dashboard() {
   const { profile } = useAuth();
   const statCards = [
-    { label: 'Total EcoScore', value: profile?.stats.totalPoints.toLocaleString() ?? '0', change: '+4% this week', trend: 'up', icon: Leaf, color: 'text-emerald-600' },
+    { label: 'Total Points', value: profile?.stats.totalPoints.toLocaleString() ?? '0', change: '+4% this week', trend: 'up', icon: Leaf, color: 'text-emerald-600' },
     { label: 'CO₂ Saved', value: `${profile?.stats.co2Saved ?? 0} kg`, change: '+1.8 kg', trend: 'up', icon: Zap, color: 'text-blue-600' },
     { label: 'Activities', value: `${profile?.stats.totalActivities ?? 0}`, change: 'New logs', trend: 'up', icon: CheckCircle2, color: 'text-purple-600' },
     { label: 'Trees Planted', value: `${profile?.forest.trees ?? 0}`, change: `${Math.round((profile?.forest.progressToNext ?? 0) * 100)}% to next`, trend: 'up', icon: TreePine, color: 'text-green-600' },
@@ -85,6 +86,11 @@ const aiInsights = [
                 ))
               )}
             </div>
+          </div>
+
+          {/* Daily Challenges */}
+          <div className="bg-white border border-gray-200 rounded-lg p-6">
+            <DailyChallengesView />
           </div>
 
           {/* Tracking / Forest (Quick Access) */}

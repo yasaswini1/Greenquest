@@ -1,4 +1,6 @@
-import { Award, Calendar, Flame, Trophy, TrendingUp, Shield, Leaf, Zap, MapPin, Mail, Globe } from 'lucide-react';
+import { useState } from 'react';
+import { Award, Calendar, Flame, Trophy, TrendingUp, Shield, Leaf, Zap, MapPin, Mail, Globe, LogOut } from 'lucide-react';
+import { LogoutConfirmDialog } from './LogoutConfirmDialog';
 import { useAuth } from '../context/AuthContext';
 
 const badges = [
@@ -13,7 +15,7 @@ const badges = [
 ];
 
 const milestones = [
-  { id: '1', title: 'Joined EcoScore AI', date: 'Oct 22, 2025', icon: '🎉' },
+  { id: '1', title: 'Joined GreenQuest', date: 'Oct 22, 2025', icon: '🎉' },
   { id: '2', title: 'First 100 Points', date: 'Oct 25, 2025', icon: '🌟' },
   { id: '3', title: 'Completed First Challenge', date: 'Nov 1, 2025', icon: '🏆' },
   { id: '4', title: 'Reached 1000 Points', date: 'Nov 10, 2025', icon: '💎' },
@@ -22,7 +24,8 @@ const milestones = [
 ];
 
 export function ProfileView() {
-  const { profile } = useAuth();
+  const { profile, logout } = useAuth();
+  const [showLogoutDialog, setShowLogoutDialog] = useState(false);
   const user = profile?.user;
   const earnedBadges = badges.filter(b => b.earned);
   const lockedBadges = badges.filter(b => !b.earned);
@@ -36,7 +39,13 @@ export function ProfileView() {
   ];
 
   return (
-    <div className="space-y-6">
+    <>
+      <LogoutConfirmDialog
+        isOpen={showLogoutDialog}
+        onClose={() => setShowLogoutDialog(false)}
+        onConfirm={logout}
+      />
+      <div className="space-y-6">
       {/* Profile Header */}
       <div className="bg-white border border-gray-200 rounded-lg p-6">
         <div className="flex flex-col md:flex-row gap-6">
@@ -61,13 +70,23 @@ export function ProfileView() {
                   </span>
                   <span className="flex items-center gap-1 text-gray-600">
                     <Globe className="w-4 h-4" />
-                    @ecoscore
+                    @greenquest
                   </span>
                 </div>
               </div>
-              <button className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
-                Edit Profile
-              </button>
+              <div className="flex flex-col gap-2">
+                <button className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
+                  Edit Profile
+                </button>
+                <button
+                  onClick={() => setShowLogoutDialog(true)}
+                  className="flex items-center justify-center gap-2 px-4 py-2 bg-rose-50 border border-rose-200 text-rose-700 rounded-lg hover:bg-rose-100 transition-colors"
+                  title="Log out"
+                >
+                  <LogOut className="w-4 h-4" />
+                  <span>Log Out</span>
+                </button>
+              </div>
             </div>
             <div className="flex flex-wrap gap-2">
               <span className="px-3 py-1 bg-amber-50 text-amber-700 rounded-full border border-amber-200">
@@ -183,6 +202,7 @@ export function ProfileView() {
         </div>
       </div>
     </div>
+    </>
   );
 }
 

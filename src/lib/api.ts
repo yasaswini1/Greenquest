@@ -64,7 +64,22 @@ export async function fetchActivities(token: string): Promise<{ activities: Acti
 }
 
 export async function submitActivity(formData: FormData, token: string) {
-  return request<{ activity: Activity; profile: ProfileResponse; geoBonus: number }>(
+  return request<{ 
+    activity: Activity; 
+    profile: ProfileResponse; 
+    geoBonus: number;
+    aiVerification?: {
+      score: number;
+      label: string;
+      matches: boolean;
+      confidence: number;
+    };
+    challengeCompleted?: {
+      challengeId: string;
+      title: string;
+      bonusPoints: number;
+    };
+  }>(
     '/api/activities',
     {
       method: 'POST',
@@ -80,5 +95,96 @@ export async function fetchLeaderboard(): Promise<{ leaderboard: LeaderboardEntr
 
 export async function fetchFeed(token: string, scope: 'public' | 'private' = 'private'): Promise<{ posts: Activity[] }> {
   return request<{ posts: Activity[] }>(`/api/feed?scope=${scope}`, {}, token);
+}
+
+// Ticket functions
+export async function createTicket(formData: FormData, token: string) {
+  return request<{ ticket: any; message: string }>(
+    '/api/tickets',
+    {
+      method: 'POST',
+      body: formData,
+    },
+    token,
+  );
+}
+
+export async function fetchTickets(token: string) {
+  return request<{ tickets: any[] }>('/api/tickets', {}, token);
+}
+
+// Admin functions
+export async function adminLogin(email: string, password: string) {
+  return request<{ token: string; user: any }>(
+    '/api/auth/admin/login',
+    {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    },
+  );
+}
+
+export async function fetchAdminTickets(token: string, status?: string) {
+  const url = status ? `/api/admin/tickets?status=${status}` : '/api/admin/tickets';
+  return request<{ tickets: any[] }>(url, {}, token);
+}
+
+export async function fetchAdminTicketDetails(token: string, ticketId: string) {
+  return request<{ ticket: any; evidence: any[] }>(`/api/admin/tickets/${ticketId}`, {}, token);
+}
+
+export async function reviewTicket(token: string, ticketId: string, action: 'approve' | 'reject', newPoints?: number, notes?: string) {
+  return request<{ ticket: any; message: string }>(
+    `/api/admin/tickets/${ticketId}/review`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ action, newPoints, notes }),
+    },
+    token,
+  );
+}
+
+// Challenge functions
+export async function fetchChallenges(token: string) {
+  return request<{ challenges: any[] }>('/api/challenges', {}, token);
+}
+
+export async function completeChallenge(token: string, challengeId: string, activityId: string, evidenceValue: number, evidenceUnit: string) {
+  return request<{ completion: any; bonusPoints: number; message: string }>(
+    `/api/challenges/${challengeId}/complete`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ activityId, evidenceValue, evidenceUnit }),
+    },
+    token,
+  );
+}
+
+// Search functions
+export async function searchUsers(query: string, token: string) {
+  return request<{ results: any[] }>(`/api/search?q=${encodeURIComponent(query)}`, {}, token);
+}
+
+// Reward functions
+export async function redeemReward(token: string, rewardId: string, points: number) {
+  return request<{ redemption: any; message: string }>(
+    '/api/rewards/redeem',
+    {
+      method: 'POST',
+      body: JSON.stringify({ rewardId, points }),
+    },
+    token,
+  );
+}
+
+// Delete activity
+export async function deleteActivity(activityId: string, token: string) {
+  return request<{ message: string }>(
+    `/api/activities/${activityId}`,
+    {
+      method: 'DELETE',
+    },
+    token,
+  );
 }
 

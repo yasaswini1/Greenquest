@@ -10,6 +10,7 @@ interface AuthContextValue {
   error: string | null;
   streakNotification: { streak: number; show: boolean } | null;
   login: (email: string, password: string) => Promise<void>;
+  adminLogin: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string) => Promise<void>;
   logout: () => void;
   refreshProfile: () => Promise<void>;
@@ -17,7 +18,7 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
-const STORAGE_KEY = 'ecoScoreToken';
+const STORAGE_KEY = 'greenQuestToken';
 
 export function AuthProvider({ children }: PropsWithChildren) {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(STORAGE_KEY));
@@ -65,6 +66,25 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setLoading(false);
     }
   }, [token, fetchProfile]);
+
+  const adminLogin = useCallback(
+    async (email: string, password: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await api.adminLogin(email, password);
+        applyToken(data.token);
+        await fetchProfile(data.token);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Admin login failed';
+        setError(message);
+        throw err;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [applyToken, fetchProfile],
+  );
 
   const login = useCallback(
     async (email: string, password: string) => {
@@ -132,12 +152,13 @@ export function AuthProvider({ children }: PropsWithChildren) {
       error,
       streakNotification,
       login,
+      adminLogin,
       register,
       logout,
       refreshProfile: fetchProfile,
       dismissStreakNotification,
     }),
-    [token, profile, loading, error, streakNotification, login, register, logout, fetchProfile, dismissStreakNotification],
+    [token, profile, loading, error, streakNotification, login, adminLogin, register, logout, fetchProfile, dismissStreakNotification],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

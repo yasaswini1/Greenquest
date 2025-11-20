@@ -7,11 +7,12 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { nanoid } = require('nanoid');
 const db = require('./db');
+const { analyzeImageServer, calculatePointsFromAI } = require('./ai');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const app = express();
 const PORT = process.env.PORT || 4000;
-const JWT_SECRET = process.env.JWT_SECRET || 'eco-score-secret';
+const JWT_SECRET = process.env.JWT_SECRET || 'greenquest-secret';
 
 const uploadsDir = path.join(__dirname, 'uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -23,9 +24,22 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
+// Separate storage for ticket evidence (these are kept, not deleted)
+const ticketStorage = multer.diskStorage({
+  destination: (_, __, cb) => {
+    const ticketDir = path.join(__dirname, 'uploads', 'tickets');
+    fs.mkdirSync(ticketDir, { recursive: true });
+    cb(null, ticketDir);
+  },
+  filename: (_, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`),
+});
+
+const uploadTicketEvidence = multer({ storage: ticketStorage });
+
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(uploadsDir));
+app.use('/uploads/tickets', express.static(path.join(uploadsDir, 'tickets')));
 
 const sanitizeUser = (user) => {
   if (!user) return null;
@@ -55,6 +69,28 @@ const authMiddleware = (req, res, next) => {
 };
 
 app.get('/api/health', (_, res) => res.json({ status: 'ok' }));
+
+// Health check endpoint for CLIP (before auth middleware)
+app.get('/api/health/clip', async (req, res) => {
+  try {
+    res.json({
+      status: 'ok',
+      clip: {
+        model: 'CLIP VIT-B/32',
+        status: 'ready',
+        message: 'CLIP model will be loaded on first request (may take 30-60 seconds)',
+      },
+    });
+  } catch (error) {
+    res.status(503).json({
+      status: 'error',
+      clip: {
+        error: error.message,
+      },
+      message: 'CLIP model failed to initialize. Please check server logs.',
+    });
+  }
+});
 
 app.post('/api/auth/register', (req, res) => {
   const { name, email, password } = req.body;
@@ -261,7 +297,52 @@ app.get('/api/activities', authMiddleware, (req, res) => {
   res.json({ activities });
 });
 
-app.post('/api/activities', authMiddleware, upload.single('image'), (req, res) => {
+// Analysis-only endpoint (before submission)
+app.post('/api/activities/analyze', authMiddleware, upload.single('image'), async (req, res) => {
+  const { category } = req.body;
+  
+  if (!req.file) {
+    return res.status(400).json({ message: 'Image is required for analysis' });
+  }
+  
+  if (!category) {
+    return res.status(400).json({ message: 'Category is required' });
+  }
+
+  try {
+    console.log(`[Server] Starting AI analysis for category: ${category}`);
+    const aiResult = await analyzeImageServer(req.file.path, category);
+    
+    // Check if CLIP analysis failed
+    if (aiResult.label === 'clip_error') {
+      return res.status(503).json({ 
+        message: 'CLIP model failed to analyze image. Please try again.',
+        error: 'CLIP_ERROR',
+        aiScore: aiResult.aiScore,
+        label: aiResult.label,
+        matches: aiResult.matches,
+      });
+    }
+    
+    res.json({
+      aiScore: aiResult.aiScore,
+      label: aiResult.label,
+      matches: aiResult.matches,
+      confidence: aiResult.confidence,
+      description: aiResult.description,
+      emissions: aiResult.emissions || { co2_kg: 0, energy_kwh: 0, duration_seconds: 0 },
+    });
+  } catch (error) {
+    console.error('[Server] AI analysis error:', error);
+    res.status(500).json({ 
+      message: 'AI analysis failed',
+      error: error.message,
+      details: 'CLIP model may not be loaded. Please check server logs.'
+    });
+  }
+});
+
+app.post('/api/activities', authMiddleware, upload.single('image'), async (req, res) => {
   const {
     type,
     category,
@@ -279,17 +360,8 @@ app.post('/api/activities', authMiddleware, upload.single('image'), (req, res) =
     return res.status(400).json({ message: 'Type and category are required' });
   }
 
-  const defaultPoints = {
-    transport: 25,
-    energy: 30,
-    water: 20,
-    waste: 20,
-    food: 25,
-    tree: 50,
-    event: 40,
-  };
-
-  const resolvedPoints = Number(points) || defaultPoints[category] || 20;
+  // No hardcoded defaults - user must provide points or it will be calculated from AI
+  const basePoints = Number(points) || 0;
   const latNum = latitude ? Number(latitude) : null;
   const lngNum = longitude ? Number(longitude) : null;
   const accuracyNum = geoAccuracy ? Number(geoAccuracy) : null;
@@ -310,9 +382,86 @@ app.post('/api/activities', authMiddleware, upload.single('image'), (req, res) =
           : 5,
       )
     : 0;
-  const finalPoints = resolvedPoints + geoBonus;
+
+  // Server-side AI verification
+  let aiResult = null;
+  let aiScore = null;
+  let serverAiLabel = null;
+  let serverAiMatches = true;
+
+  if (req.file) {
+    try {
+      console.log(`[Server] Starting AI verification for category: ${category}`);
+      aiResult = await analyzeImageServer(req.file.path, category);
+      aiScore = aiResult.aiScore;
+      serverAiLabel = aiResult.label;
+      serverAiMatches = aiResult.matches;
+      console.log(`[Server] AI verification complete: matches=${serverAiMatches}, score=${aiScore}, label=${serverAiLabel}`);
+    } catch (error) {
+      console.error('[Server] AI verification error:', error);
+      // Continue with submission even if AI fails, but mark as low confidence
+      aiScore = 30; // Lower default score if AI fails
+      serverAiMatches = false; // Don't assume it matches if AI fails
+    }
+  } else {
+    console.log('[Server] No image file provided, skipping AI verification');
+  }
+
+  // Use server-side AI results if available, otherwise use client-side
+  // IMPORTANT: Server-side AI takes precedence - it's more reliable
+  let finalAiMatches;
+  let finalAiScore;
+  let finalAiLabel;
+  
+  if (aiResult) {
+    // Server AI ran successfully - use its results
+    finalAiMatches = serverAiMatches;
+    finalAiScore = aiScore;
+    finalAiLabel = serverAiLabel;
+    console.log(`[Server] Using server-side AI results: matches=${finalAiMatches}, score=${finalAiScore}`);
+  } else {
+    // Neither AI ran - this should not happen if image was uploaded
+    // Default to low confidence to require manual review
+    finalAiMatches = false;
+    finalAiScore = 20; // Very low score - needs review
+    finalAiLabel = 'no_ai_verification';
+    console.warn(`[Server] WARNING: No AI verification available - defaulting to low score`);
+  }
+
+  // If no base points provided, calculate from AI confidence
+  let effectiveBasePoints = basePoints;
+  if (effectiveBasePoints === 0 && aiResult) {
+    // Calculate base points from AI confidence (20-50 points range)
+    effectiveBasePoints = Math.round(20 + (aiResult.confidence * 30));
+  } else if (effectiveBasePoints === 0) {
+    // Minimum points if no AI and no user input
+    effectiveBasePoints = 10;
+  }
+
+  // Log for debugging
+  console.log(`[Server] AI Verification Results:`);
+  console.log(`  - Server AI ran: ${!!aiResult}`);
+  console.log(`  - Server matches: ${serverAiMatches}`);
+  console.log(`  - Final matches: ${finalAiMatches}`);
+  console.log(`  - Server score: ${aiScore}`);
+  console.log(`  - Final score: ${finalAiScore}`);
+  console.log(`  - Label: ${finalAiLabel}`);
+  console.log(`  - Base points (user): ${basePoints}, Effective base: ${effectiveBasePoints}`);
+
+  // Calculate points based on AI verification
+  const finalPoints = calculatePointsFromAI(effectiveBasePoints, aiResult?.confidence || 0.3, finalAiMatches, geoBonus);
+  
+  console.log(`  - Final points: ${finalPoints} (base: ${basePoints}, geo bonus: ${geoBonus})`);
   const resolvedCO2 = Number(co2Saved) || Number((finalPoints * 0.12).toFixed(2));
-  const status = 'verified';
+  
+  // Determine status based on AI verification
+  let status = 'verified';
+  if (finalAiScore < 30) {
+    status = 'flagged';
+  } else if (finalAiScore < 60) {
+    status = 'pending';
+  }
+
   const activityId = nanoid();
   const now = new Date().toISOString();
   const eventTimeIso = (() => {
@@ -325,9 +474,9 @@ app.post('/api/activities', authMiddleware, upload.single('image'), (req, res) =
 
   db.prepare(
     `INSERT INTO activities 
-      (id, user_id, type, category, description, points, co2_saved, status, image_path, event_time, location, latitude, longitude, geo_accuracy, visibility, created_at)
+      (id, user_id, type, category, description, points, co2_saved, status, image_path, event_time, location, latitude, longitude, geo_accuracy, visibility, ai_score, client_ai_label, client_ai_score, created_at)
      VALUES
-      (@id, @user_id, @type, @category, @description, @points, @co2_saved, @status, @image_path, @event_time, @location, @latitude, @longitude, @geo_accuracy, @visibility, @created_at)`
+      (@id, @user_id, @type, @category, @description, @points, @co2_saved, @status, @image_path, @event_time, @location, @latitude, @longitude, @geo_accuracy, @visibility, @ai_score, @client_ai_label, @client_ai_score, @created_at)`
   ).run({
     id: activityId,
     user_id: req.user.id,
@@ -344,6 +493,9 @@ app.post('/api/activities', authMiddleware, upload.single('image'), (req, res) =
     longitude: hasGeo ? lngNum : null,
     geo_accuracy: hasGeo ? accuracyNum : null,
     visibility: visibilityValue,
+    ai_score: finalAiScore,
+    client_ai_label: null,
+    client_ai_score: null,
     created_at: now,
   });
 
@@ -356,14 +508,513 @@ app.post('/api/activities', authMiddleware, upload.single('image'), (req, res) =
 
   const activity = db.prepare('SELECT * FROM activities WHERE id = ?').get(activityId);
 
+  // Check for daily challenge completion
+  let challengeCompleted = null;
+  if (finalAiMatches && finalAiScore >= 60) {
+    const today = new Date().toISOString().split('T')[0];
+    const relevantChallenges = db.prepare(`
+      SELECT * FROM daily_challenges 
+      WHERE category = ? AND challenge_date = ? AND is_active = 1
+    `).all(category, today);
+
+    for (const challenge of relevantChallenges) {
+      // Check if user already completed this challenge today
+      const existing = db.prepare(`
+        SELECT * FROM challenge_completions 
+        WHERE challenge_id = ? AND user_id = ? AND DATE(completed_at) = ?
+      `).get(challenge.id, req.user.id, today);
+
+      if (!existing) {
+        // Auto-complete challenge if category matches and AI verified
+        const completionId = nanoid();
+        db.prepare(`
+          INSERT INTO challenge_completions 
+          (id, challenge_id, user_id, activity_id, evidence_value, evidence_unit, bonus_points_earned, completed_at)
+          VALUES (@id, @challenge_id, @user_id, @activity_id, @evidence_value, @evidence_unit, @bonus_points, @completed_at)
+        `).run({
+          id: completionId,
+          challenge_id: challenge.id,
+          user_id: req.user.id,
+          activity_id: activityId,
+          evidence_value: challenge.target_value,
+          evidence_unit: challenge.target_unit,
+          bonus_points: challenge.bonus_points,
+          completed_at: new Date().toISOString(),
+        });
+
+        // Award bonus points (already updated user points above, so add bonus separately)
+        db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(challenge.bonus_points, req.user.id);
+        
+        challengeCompleted = {
+          challengeId: challenge.id,
+          title: challenge.title,
+          bonusPoints: challenge.bonus_points,
+        };
+        
+        console.log(`[Server] ✅ Challenge completed: ${challenge.title} - +${challenge.bonus_points} bonus points`);
+        break; // Only complete one challenge per activity
+      }
+    }
+  }
+
+  // Delete the uploaded image immediately after AI assessment (as per Terms & Conditions)
+  // Only keep images if they're part of an escalation ticket
+  // Do this asynchronously after sending response
+  if (req.file && fs.existsSync(req.file.path)) {
+    const imagePathToDelete = req.file.path;
+    setImmediate(() => {
+      try {
+        fs.unlinkSync(imagePathToDelete);
+        console.log(`[Server] Deleted regular submission image: ${imagePathToDelete}`);
+        // Update activity to remove image_path since file is deleted
+        db.prepare('UPDATE activities SET image_path = NULL WHERE id = ?').run(activityId);
+      } catch (error) {
+        console.error(`[Server] Error deleting image: ${error.message}`);
+      }
+    });
+    // Set image_path to null in response since it will be deleted
+    activity.image_path = null;
+  }
+
   res.status(201).json({
     activity,
     geoBonus,
+    aiVerification: {
+      score: finalAiScore,
+      label: finalAiLabel,
+      matches: finalAiMatches,
+      confidence: aiResult?.confidence || 0.5,
+      emissions: aiResult?.emissions || { co2_kg: 0, energy_kwh: 0, duration_seconds: 0 },
+    },
+    challengeCompleted,
     profile: buildProfileResponse(req.user.id),
   });
 });
 
+// Admin authentication middleware
+const adminMiddleware = (req, res, next) => {
+  authMiddleware(req, res, () => {
+    if (!req.user || !req.user.is_admin) {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    next();
+  });
+};
+
+// Admin login endpoint
+app.post('/api/auth/admin/login', (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email and password are required' });
+  }
+
+  const user = db.prepare('SELECT * FROM users WHERE email = ? AND is_admin = 1').get(email);
+  if (!user) {
+    return res.status(401).json({ message: 'Invalid admin credentials' });
+  }
+
+  const valid = bcrypt.compareSync(password, user.password_hash);
+  if (!valid) {
+    return res.status(401).json({ message: 'Invalid admin credentials' });
+  }
+
+  return res.json({ token: generateToken(user), user: sanitizeUser(user) });
+});
+
+// Create ticket endpoint
+app.post('/api/tickets', authMiddleware, uploadTicketEvidence.array('evidence', 5), (req, res) => {
+  const { activityId, description, activityType, category, currentPoints, aiScore } = req.body;
+  
+  if (!activityId || !description || !activityType || !category) {
+    return res.status(400).json({ message: 'Missing required fields' });
+  }
+
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ message: 'At least one evidence image is required' });
+  }
+
+  // Verify activity belongs to user
+  const activity = db.prepare('SELECT * FROM activities WHERE id = ? AND user_id = ?').get(activityId, req.user.id);
+  if (!activity) {
+    return res.status(404).json({ message: 'Activity not found' });
+  }
+
+  const ticketId = nanoid();
+  const now = new Date().toISOString();
+
+  // Create ticket
+  db.prepare(`
+    INSERT INTO tickets (id, activity_id, user_id, description, activity_type, category, current_points, ai_score, created_at)
+    VALUES (@id, @activity_id, @user_id, @description, @activity_type, @category, @current_points, @ai_score, @created_at)
+  `).run({
+    id: ticketId,
+    activity_id: activityId,
+    user_id: req.user.id,
+    description,
+    activity_type: activityType,
+    category,
+    current_points: Number(currentPoints) || 0,
+    ai_score: Number(aiScore) || 0,
+    created_at: now,
+  });
+
+  // Store evidence images (these are kept, not deleted)
+  const insertEvidence = db.prepare(`
+    INSERT INTO ticket_evidence (id, ticket_id, image_path, created_at)
+    VALUES (@id, @ticket_id, @image_path, @created_at)
+  `);
+
+  req.files.forEach((file) => {
+    insertEvidence.run({
+      id: nanoid(),
+      ticket_id: ticketId,
+      image_path: `/uploads/tickets/${path.basename(file.path)}`,
+      created_at: now,
+    });
+  });
+
+  const ticket = db.prepare(`
+    SELECT t.*, u.name as user_name, u.email as user_email
+    FROM tickets t
+    JOIN users u ON t.user_id = u.id
+    WHERE t.id = ?
+  `).get(ticketId);
+
+  res.status(201).json({ ticket, message: 'Ticket created successfully' });
+});
+
+// Get user's tickets
+app.get('/api/tickets', authMiddleware, (req, res) => {
+  const tickets = db.prepare(`
+    SELECT t.*, 
+           (SELECT COUNT(*) FROM ticket_evidence WHERE ticket_id = t.id) as evidence_count
+    FROM tickets t
+    WHERE t.user_id = ?
+    ORDER BY t.created_at DESC
+  `).all(req.user.id);
+
+  res.json({ tickets });
+});
+
+// Admin: Get all tickets
+app.get('/api/admin/tickets', adminMiddleware, (req, res) => {
+  const { status } = req.query;
+  let query = `
+    SELECT t.*, u.name as user_name, u.email as user_email,
+           (SELECT COUNT(*) FROM ticket_evidence WHERE ticket_id = t.id) as evidence_count
+    FROM tickets t
+    JOIN users u ON t.user_id = u.id
+  `;
+  const params = [];
+  
+  if (status) {
+    query += ' WHERE t.status = ?';
+    params.push(status);
+  }
+  
+  query += ' ORDER BY t.created_at DESC';
+  
+  const tickets = db.prepare(query).all(...params);
+  res.json({ tickets });
+});
+
+// Admin: Get ticket details with evidence
+app.get('/api/admin/tickets/:id', adminMiddleware, (req, res) => {
+  const { id } = req.params;
+  
+  const ticket = db.prepare(`
+    SELECT t.*, u.name as user_name, u.email as user_email, a.*
+    FROM tickets t
+    JOIN users u ON t.user_id = u.id
+    LEFT JOIN activities a ON t.activity_id = a.id
+    WHERE t.id = ?
+  `).get(id);
+
+  if (!ticket) {
+    return res.status(404).json({ message: 'Ticket not found' });
+  }
+
+  const evidence = db.prepare(`
+    SELECT * FROM ticket_evidence WHERE ticket_id = ?
+  `).all(id);
+
+  res.json({ ticket, evidence });
+});
+
+// Admin: Review ticket (approve/reject)
+app.post('/api/admin/tickets/:id/review', adminMiddleware, (req, res) => {
+  const { id } = req.params;
+  const { action, newPoints, notes } = req.body; // action: 'approve' | 'reject'
+
+  if (!action || !['approve', 'reject'].includes(action)) {
+    return res.status(400).json({ message: 'Invalid action. Must be "approve" or "reject"' });
+  }
+
+  const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(id);
+  if (!ticket) {
+    return res.status(404).json({ message: 'Ticket not found' });
+  }
+
+  if (ticket.status !== 'pending') {
+    return res.status(400).json({ message: 'Ticket already reviewed' });
+  }
+
+  const now = new Date().toISOString();
+  const status = action === 'approve' ? 'approved' : 'rejected';
+
+  // Update ticket
+  db.prepare(`
+    UPDATE tickets
+    SET status = @status,
+        admin_id = @admin_id,
+        admin_notes = @admin_notes,
+        new_points = @new_points,
+        resolved_at = @resolved_at
+    WHERE id = @id
+  `).run({
+    id,
+    status,
+    admin_id: req.user.id,
+    admin_notes: notes || null,
+    new_points: action === 'approve' && newPoints ? Number(newPoints) : null,
+    resolved_at: now,
+  });
+
+  // If approved and new points provided, update activity and user points
+  if (action === 'approve' && newPoints) {
+    const activity = db.prepare('SELECT * FROM activities WHERE id = ?').get(ticket.activity_id);
+    if (activity) {
+      const pointsDiff = Number(newPoints) - ticket.current_points;
+      
+      // Update activity points
+      db.prepare('UPDATE activities SET points = ? WHERE id = ?').run(newPoints, ticket.activity_id);
+      
+      // Update user points
+      db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(pointsDiff, ticket.user_id);
+    }
+  }
+
+  const updatedTicket = db.prepare(`
+    SELECT t.*, u.name as user_name, u.email as user_email
+    FROM tickets t
+    JOIN users u ON t.user_id = u.id
+    WHERE t.id = ?
+  `).get(id);
+
+  res.json({ ticket: updatedTicket, message: `Ticket ${action === 'approve' ? 'approved' : 'rejected'}` });
+});
+
+// Daily Challenges API
+app.get('/api/challenges', authMiddleware, (req, res) => {
+  const today = new Date().toISOString().split('T')[0];
+  
+  const challenges = db.prepare(`
+    SELECT c.*,
+           (SELECT COUNT(*) FROM challenge_completions cc 
+            WHERE cc.challenge_id = c.id AND cc.user_id = ?) as user_completed,
+           (SELECT bonus_points_earned FROM challenge_completions cc 
+            WHERE cc.challenge_id = c.id AND cc.user_id = ? LIMIT 1) as user_bonus_earned
+    FROM daily_challenges c
+    WHERE c.challenge_date = ? AND c.is_active = 1
+    ORDER BY c.created_at DESC
+  `).all(req.user.id, req.user.id, today);
+
+  res.json({ challenges });
+});
+
+app.post('/api/challenges/:id/complete', authMiddleware, async (req, res) => {
+  const { id } = req.params;
+  const { activityId, evidenceValue, evidenceUnit } = req.body;
+
+  const challenge = db.prepare('SELECT * FROM daily_challenges WHERE id = ? AND is_active = 1').get(id);
+  if (!challenge) {
+    return res.status(404).json({ message: 'Challenge not found or inactive' });
+  }
+
+  // Check if already completed today
+  const today = new Date().toISOString().split('T')[0];
+  const existing = db.prepare(`
+    SELECT * FROM challenge_completions 
+    WHERE challenge_id = ? AND user_id = ? AND DATE(completed_at) = ?
+  `).get(id, req.user.id, today);
+
+  if (existing) {
+    return res.status(400).json({ message: 'Challenge already completed today' });
+  }
+
+  // Verify evidence value meets target
+  const value = Number(evidenceValue) || 0;
+  const target = Number(challenge.target_value);
+  
+  if (value < target) {
+    return res.status(400).json({ 
+      message: `Evidence value (${value} ${challenge.target_unit}) does not meet target (${target} ${challenge.target_unit})` 
+    });
+  }
+
+  // Award bonus points
+  const completionId = nanoid();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO challenge_completions 
+    (id, challenge_id, user_id, activity_id, evidence_value, evidence_unit, bonus_points_earned, completed_at)
+    VALUES (@id, @challenge_id, @user_id, @activity_id, @evidence_value, @evidence_unit, @bonus_points, @completed_at)
+  `).run({
+    id: completionId,
+    challenge_id: id,
+    user_id: req.user.id,
+    activity_id: activityId || null,
+    evidence_value: value,
+    evidence_unit: evidenceUnit || challenge.target_unit,
+    bonus_points: challenge.bonus_points,
+    completed_at: now,
+  });
+
+  // Update user points
+  db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(challenge.bonus_points, req.user.id);
+
+  const completion = db.prepare('SELECT * FROM challenge_completions WHERE id = ?').get(completionId);
+
+  res.json({ 
+    completion,
+    bonusPoints: challenge.bonus_points,
+    message: `Challenge completed! +${challenge.bonus_points} bonus points awarded.`
+  });
+});
+
+// Search API - Search users and their public activities
+app.get('/api/search', authMiddleware, (req, res) => {
+  const { q } = req.query;
+  
+  if (!q || typeof q !== 'string' || q.trim().length === 0) {
+    return res.status(400).json({ message: 'Search query is required' });
+  }
+
+  const searchTerm = `%${q.trim()}%`;
+  
+  // Search for users matching the query
+  const users = db.prepare(`
+    SELECT id, name, email, points, co2_saved
+    FROM users
+    WHERE name LIKE ? OR email LIKE ?
+    LIMIT 20
+  `).all(searchTerm, searchTerm);
+
+  // For each user, get their public activities
+  const results = users.map(user => {
+    const activities = db.prepare(`
+      SELECT a.*, u.name as user_name
+      FROM activities a
+      JOIN users u ON a.user_id = u.id
+      WHERE a.user_id = ? AND a.visibility = 'public'
+      ORDER BY a.created_at DESC
+      LIMIT 10
+    `).all(user.id);
+
+    return {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        points: user.points,
+      },
+      activities: activities,
+    };
+  });
+
+  res.json({ results });
+});
+
+// Delete activity
+app.delete('/api/activities/:id', authMiddleware, (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+
+  // Check if activity exists and belongs to user
+  const activity = db.prepare('SELECT * FROM activities WHERE id = ? AND user_id = ?').get(id, userId);
+  if (!activity) {
+    return res.status(404).json({ message: 'Activity not found or you do not have permission to delete it' });
+  }
+
+  // Delete associated image file if exists
+  if (activity.image_path) {
+    const imagePath = path.join(__dirname, activity.image_path);
+    try {
+      if (fs.existsSync(imagePath)) {
+        fs.unlinkSync(imagePath);
+      }
+    } catch (err) {
+      console.error(`[Server] Error deleting image file: ${err.message}`);
+    }
+  }
+
+  // Delete the activity
+  db.prepare('DELETE FROM activities WHERE id = ?').run(id);
+
+  res.json({ message: 'Activity deleted successfully' });
+});
+
+// Rewards API
+app.post('/api/rewards/redeem', authMiddleware, (req, res) => {
+  const { rewardId, points } = req.body;
+
+  if (!rewardId || !points) {
+    return res.status(400).json({ message: 'Reward ID and points are required' });
+  }
+
+  const user = db.prepare('SELECT points FROM users WHERE id = ?').get(req.user.id);
+  if (!user) {
+    return res.status(404).json({ message: 'User not found' });
+  }
+
+  if (user.points < points) {
+    return res.status(400).json({ message: 'Insufficient points' });
+  }
+
+  // Check if reward exists
+  const reward = db.prepare('SELECT * FROM rewards WHERE id = ?').get(rewardId);
+  if (!reward) {
+    // If reward doesn't exist in DB, create a temporary one (for now)
+    // In production, you'd want to seed rewards properly
+  }
+
+  // Deduct points
+  db.prepare('UPDATE users SET points = points - ? WHERE id = ?').run(points, req.user.id);
+
+  // Create redemption record
+  const redemptionId = nanoid();
+  const redemptionCode = `${rewardId.toUpperCase().substring(0, 4)}-${Date.now().toString().slice(-6)}`;
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO redemptions (id, user_id, reward_id, points, status, redemption_code, created_at)
+    VALUES (?, ?, ?, ?, 'completed', ?, ?)
+  `).run(redemptionId, req.user.id, rewardId, points, redemptionCode, now);
+
+  const redemption = db.prepare('SELECT * FROM redemptions WHERE id = ?').get(redemptionId);
+
+  res.json({
+    redemption,
+    message: 'Reward redeemed successfully',
+  });
+});
+
+// Global error handler to prevent crashes
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit the process
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Don't exit the process - log and continue
+});
+
 app.listen(PORT, () => {
   console.log(`API server listening on http://localhost:${PORT}`);
+  console.log(`Using CLIP VIT-B/32 for image analysis`);
+  console.log(`Model will be loaded on first request (may take 30-60 seconds)`);
+  console.log(`Health check: http://localhost:${PORT}/api/health/clip`);
 });
 

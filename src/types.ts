@@ -19,6 +19,9 @@ export interface Activity {
   longitude?: number | null;
   geo_accuracy?: number | null;
   visibility?: Visibility;
+  ai_score?: number | null;
+  client_ai_label?: string | null;
+  client_ai_score?: number | null;
   created_at: string;
 }
 
@@ -30,6 +33,7 @@ export interface User {
   co2_saved: number;
   avatar_url?: string | null;
   current_streak?: number;
+  is_admin?: number | boolean;
   created_at: string;
 }
 

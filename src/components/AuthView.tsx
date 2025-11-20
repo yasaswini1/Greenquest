@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Leaf } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { TermsAndConditions } from './TermsAndConditions';
 
 type Mode = 'login' | 'register';
 
@@ -9,6 +10,8 @@ export function AuthView() {
   const [mode, setMode] = useState<Mode>('login');
   const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [localError, setLocalError] = useState<string | null>(null);
+  const [showTerms, setShowTerms] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -22,10 +25,27 @@ export function AuthView() {
           setLocalError('Name is required');
           return;
         }
+        if (!termsAccepted) {
+          setShowTerms(true);
+          return;
+        }
         await register(form.name, form.email, form.password);
       }
     } catch (err) {
       setLocalError(err instanceof Error ? err.message : 'Something went wrong');
+    }
+  };
+
+  const handleTermsAccept = () => {
+    setTermsAccepted(true);
+    setShowTerms(false);
+  };
+
+  const handleRegisterClick = () => {
+    if (!termsAccepted) {
+      setShowTerms(true);
+    } else {
+      setMode('register');
     }
   };
 
@@ -42,7 +62,7 @@ export function AuthView() {
             <Leaf className="w-6 h-6 text-emerald-600" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-gray-900">EcoScore AI</h1>
+            <h1 className="text-2xl font-semibold text-gray-900">GreenQuest</h1>
             <p className="text-sm text-gray-500">Sustainable actions that grow forests</p>
           </div>
         </div>
@@ -113,12 +133,41 @@ export function AuthView() {
         </form>
 
         <p className="text-center text-sm text-gray-600 mt-6">
-          {mode === 'login' ? 'New to EcoScore?' : 'Already have an account?'}{' '}
-          <button type="button" onClick={toggleMode} className="text-emerald-600 font-semibold hover:underline">
-            {mode === 'login' ? 'Create an account' : 'Sign in'}
-          </button>
+          {mode === 'login' ? (
+            <>
+              New to GreenQuest?{' '}
+              <button type="button" onClick={handleRegisterClick} className="text-emerald-600 font-semibold hover:underline">
+                Create an account
+              </button>
+            </>
+          ) : (
+            <>
+              Already have an account?{' '}
+              <button type="button" onClick={toggleMode} className="text-emerald-600 font-semibold hover:underline">
+                Sign in
+              </button>
+            </>
+          )}
         </p>
+        <p className="text-center text-xs text-gray-500 mt-2">
+          <a href="/admin" className="text-purple-600 hover:underline">
+            Admin Login →
+          </a>
+        </p>
+        {mode === 'register' && termsAccepted && (
+          <p className="text-xs text-emerald-600 text-center mt-2 flex items-center justify-center gap-1">
+            <Leaf className="w-3 h-3" />
+            Terms & Conditions accepted
+          </p>
+        )}
       </div>
+
+      {showTerms && (
+        <TermsAndConditions
+          onAccept={handleTermsAccept}
+          onDecline={() => setShowTerms(false)}
+        />
+      )}
     </div>
   );
 }
